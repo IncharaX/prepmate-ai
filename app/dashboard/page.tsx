@@ -1,44 +1,39 @@
+import type { Metadata } from "next";
 import Link from "next/link";
-import { BarChart3, ClipboardList, LayoutDashboard, Sparkles } from "lucide-react";
+import { ArrowRight, ChevronRight, Clock, FileText, Sparkles } from "lucide-react";
 
+import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-
+import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { ReadinessCard } from "@/components/dashboard/ReadinessCard";
 import { ScoreTrendChart, type ScoreTrendPoint } from "@/components/dashboard/ScoreTrendChart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  MobileSidebarNav,
-  Sidebar,
-  SidebarContent,
-  SidebarGroup,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInset,
-  SidebarLayout,
-  SidebarMenu,
-  SidebarMenuButton,
-} from "@/components/ui/sidebar";
+import { Card, CardContent } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
 
+export const metadata: Metadata = {
+  title: "Dashboard",
+};
+
 type SessionSummary = {
   id: string;
-  domain: string;
-  date: string;
-  resultCount: number;
+  title: string;
+  createdAt: Date;
+  mode: "TEXT" | "VOICE";
+  status: "IN_PROGRESS" | "COMPLETED" | "ABANDONED";
+  plannedQuestions: number;
+  answeredCount: number;
   content: number;
   communication: number;
   confidence: number;
+  average: number;
 };
 
 function average(values: number[]) {
-  if (!values.length) {
-    return 0;
-  }
-
-  return values.reduce((total, value) => total + value, 0) / values.length;
+  if (!values.length) return 0;
+  return values.reduce((t, v) => t + v, 0) / values.length;
 }
 
 function roundScore(value: number) {
@@ -49,224 +44,179 @@ function formatDate(date: Date) {
   return new Intl.DateTimeFormat("en", {
     month: "short",
     day: "numeric",
+    year: "numeric",
   }).format(date);
 }
 
-async function getDashboardData() {
-  const user = await prisma.user
-    .findFirst({
-      where: {
-        sessions: {
-          some: {
-            results: {
-              some: {},
-            },
-          },
-        },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-      include: {
-        sessions: {
-          where: {
-            results: {
-              some: {},
-            },
-          },
-          orderBy: {
-            createdAt: "asc",
-          },
-          include: {
-            results: {
-              orderBy: {
-                createdAt: "asc",
-              },
-            },
-          },
-        },
-      },
-    })
-    .catch((error: unknown) => {
-      console.error("Failed to load dashboard data", error);
-      return null;
-    });
+export default async function DashboardPage() {
+  const user = await requireUser("/dashboard");
 
-  if (!user) {
-    return null;
-  }
+  const sessions = await prisma.interviewSession.findMany({
+    where: { userId: user.id },
+    include: { results: { orderBy: { order: "asc" } } },
+    orderBy: { createdAt: "desc" },
+  });
 
-  const sessions: SessionSummary[] = user.sessions.map((session) => {
-    const content = roundScore(average(session.results.map((result) => result.contentScore)));
-    const communication = roundScore(average(session.results.map((result) => result.communicationScore)));
-    const confidence = roundScore(average(session.results.map((result) => result.confidenceScore)));
-
+  const summaries: SessionSummary[] = sessions.map((s) => {
+    const answered = s.results.filter((r) => r.answer !== "");
+    const content = roundScore(average(answered.map((r) => r.contentScore)));
+    const communication = roundScore(average(answered.map((r) => r.communicationScore)));
+    const confidence = roundScore(average(answered.map((r) => r.confidenceScore)));
+    const avg = roundScore(average([content, communication, confidence]));
     return {
-      id: session.id,
-      domain: session.domain,
-      date: formatDate(session.createdAt),
-      resultCount: session.results.length,
+      id: s.id,
+      title: s.title,
+      createdAt: s.createdAt,
+      mode: s.mode,
+      status: s.status,
+      plannedQuestions: s.plannedQuestions,
+      answeredCount: answered.length,
       content,
       communication,
       confidence,
+      average: avg,
     };
   });
 
-  const chartData: ScoreTrendPoint[] = sessions.map((session, index) => ({
-    label: `${index + 1}. ${session.date}`,
-    content: session.content,
-    communication: session.communication,
-    confidence: session.confidence,
-  }));
+  const completed = summaries.filter((s) => s.status === "COMPLETED");
+  const chartData: ScoreTrendPoint[] = [...completed]
+    .reverse()
+    .map((s, index) => ({
+      label: `${index + 1}. ${formatDate(s.createdAt).split(",")[0]}`,
+      content: s.content,
+      communication: s.communication,
+      confidence: s.confidence,
+    }));
 
-  const allScores = sessions.flatMap((session) => [session.content, session.communication, session.confidence]);
-  const answerCount = user.sessions.reduce((total, session) => total + session.results.length, 0);
-
-  return {
-    userName: user.name,
-    readinessScore: roundScore(average(allScores)),
-    answerCount,
-    sessions,
-    chartData,
-  };
-}
-
-export default async function DashboardPage() {
-  const data = await getDashboardData();
+  const answerCount = summaries.reduce((t, s) => t + s.answeredCount, 0);
+  const readinessScore = roundScore(
+    average(completed.flatMap((s) => [s.content, s.communication, s.confidence])),
+  );
 
   return (
-    <SidebarLayout>
-      <Sidebar>
-        <SidebarHeader>
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-600 text-white">
-            <Sparkles className="h-5 w-5" />
-          </div>
+    <DashboardShell user={user} active="dashboard">
+      <header className="grid gap-4 rounded-xl border border-border bg-card p-6 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="font-bold text-zinc-950">PrepMate AI</p>
-            <p className="text-xs text-zinc-500">Interview Coach</p>
-          </div>
-        </SidebarHeader>
-        <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>Workspace</SidebarGroupLabel>
-            <SidebarMenu>
-              <SidebarMenuButton href="/dashboard" data-active="true">
-                <LayoutDashboard className="h-4 w-4" />
-                Dashboard
-              </SidebarMenuButton>
-              <SidebarMenuButton href="/interview">
-                <ClipboardList className="h-4 w-4" />
-                Start Interview
-              </SidebarMenuButton>
-            </SidebarMenu>
-          </SidebarGroup>
-          <div className="rounded-lg border border-cyan-100 bg-cyan-50 p-4">
-            <p className="text-sm font-semibold text-cyan-950">HR-style practice</p>
-            <p className="mt-2 text-sm leading-6 text-cyan-800">
-              Maya follows the JD and your answers, then saves the session for trend tracking.
+            <Badge variant="success">
+              <Sparkles className="h-3 w-3" />
+              {user.name ? `Welcome, ${user.name.split(" ")[0]}` : "Welcome"}
+            </Badge>
+            <h1 className="mt-3 text-3xl font-bold tracking-tight text-foreground">Your dashboard</h1>
+            <p className="mt-1 max-w-xl text-sm leading-6 text-muted-foreground">
+              Track your practice over time, review past interviews, and keep shaping the story you&apos;ll tell
+              in the real one.
             </p>
           </div>
-        </SidebarContent>
-      </Sidebar>
-      <div className="min-w-0">
-        <MobileSidebarNav>
-          <div className="mx-auto flex max-w-6xl items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-600 text-white">
-                <Sparkles className="h-4 w-4" />
-              </div>
-              <div>
-                <p className="text-sm font-bold text-zinc-950">PrepMate AI</p>
-                <p className="text-xs text-zinc-500">Dashboard</p>
-              </div>
+          <Button asChild size="lg">
+            <Link href="/interview/new">
+              <Sparkles className="h-4 w-4" />
+              New interview
+            </Link>
+          </Button>
+        </div>
+      </header>
+
+      {summaries.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <>
+          <ReadinessCard
+            score={readinessScore}
+            sessionCount={completed.length}
+            answerCount={answerCount}
+          />
+
+          {chartData.length >= 2 ? <ScoreTrendChart data={chartData} /> : null}
+
+          <section className="grid gap-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-foreground">Your sessions</h2>
+              <p className="text-xs text-muted-foreground">{summaries.length} total</p>
             </div>
-            <Button asChild size="sm">
-              <Link href="/interview">Start</Link>
-            </Button>
-          </div>
-        </MobileSidebarNav>
-        <SidebarInset>
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="rounded-lg border border-emerald-100 bg-white p-6 shadow-[0_20px_60px_rgba(16,185,129,0.12)]">
-          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <Badge className="gap-2">
-                <BarChart3 className="h-3.5 w-3.5" />
-                PrepMate AI
-              </Badge>
-              <h1 className="mt-4 text-3xl font-bold tracking-tight text-zinc-950 sm:text-4xl">Dashboard</h1>
-              <p className="mt-3 max-w-2xl text-base leading-7 text-zinc-600">
-                Track interview practice, score movement, and readiness over time.
-              </p>
-            </div>
-            <Button asChild>
-              <Link href="/interview">
-                Start Interview
-                <Sparkles className="h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
-        </header>
-
-        {!data ? (
-          <Card>
-            <CardContent className="p-8 text-center">
-              <p className="text-xl font-bold text-zinc-950">No interview history yet</p>
-              <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-zinc-600">
-                Complete an interview session and save results to the database to unlock trends and readiness scoring.
-              </p>
-              <Button asChild className="mt-6">
-                <Link href="/interview">Start Interview</Link>
-              </Button>
-            </CardContent>
-          </Card>
-        ) : (
-          <>
-            <ReadinessCard
-              score={data.readinessScore}
-              sessionCount={data.sessions.length}
-              answerCount={data.answerCount}
-            />
-
-            <ScoreTrendChart data={data.chartData} />
-
             <Card>
-              <CardHeader className="border-b border-zinc-200">
-                <Badge className="w-fit border-rose-200 bg-rose-50 text-rose-700">History</Badge>
-                <CardTitle>{data.userName}&apos;s sessions</CardTitle>
-              </CardHeader>
-              <div className="divide-y divide-zinc-200">
-                {data.sessions.map((session) => (
-                  <article key={session.id} className="grid gap-4 p-5 md:grid-cols-[1fr_auto] md:items-center">
-                    <div>
-                      <p className="text-lg font-semibold text-zinc-950">{session.domain}</p>
-                      <p className="mt-1 text-sm text-zinc-500">
-                        {session.date} · {session.resultCount} evaluated answer{session.resultCount === 1 ? "" : "s"}
-                      </p>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <ScorePill label="Content" value={session.content} />
-                      <ScorePill label="Comm." value={session.communication} />
-                      <ScorePill label="Confidence" value={session.confidence} />
-                    </div>
-                  </article>
+              <ul className="divide-y divide-border">
+                {summaries.map((s) => (
+                  <SessionRow key={s.id} session={s} />
                 ))}
-              </div>
+              </ul>
             </Card>
-          </>
-        )}
-      </div>
-        </SidebarInset>
-      </div>
-    </SidebarLayout>
+          </section>
+        </>
+      )}
+    </DashboardShell>
   );
 }
 
-function ScorePill({ label, value }: { label: string; value: number }) {
+function SessionRow({ session }: { session: SessionSummary }) {
+  const href =
+    session.status === "COMPLETED" ? `/dashboard/interview/${session.id}` : `/interview/${session.id}`;
   return (
-    <div className="min-w-24 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
-      <p className="text-sm font-bold text-zinc-950">{value}</p>
-      <p className="text-xs text-zinc-500">{label}</p>
-    </div>
+    <li>
+      <Link
+        href={href}
+        className="flex items-center justify-between gap-4 p-5 transition-colors hover:bg-muted/40"
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-semibold text-foreground">{session.title}</p>
+            <StatusBadge status={session.status} />
+            <Badge variant="outline" className="font-normal">
+              {session.mode === "VOICE" ? "Voice" : "Text"}
+            </Badge>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              {formatDate(session.createdAt)}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <FileText className="h-3 w-3" />
+              {session.answeredCount} / {session.plannedQuestions} answered
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          {session.status === "COMPLETED" ? (
+            <div className="hidden text-right sm:block">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Avg</p>
+              <p className="text-xl font-bold text-gradient-primary">{session.average}</p>
+            </div>
+          ) : null}
+          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        </div>
+      </Link>
+    </li>
+  );
+}
+
+function StatusBadge({ status }: { status: SessionSummary["status"] }) {
+  if (status === "COMPLETED") return <Badge variant="success">Completed</Badge>;
+  if (status === "IN_PROGRESS") return <Badge variant="muted">In progress</Badge>;
+  return <Badge variant="outline">Abandoned</Badge>;
+}
+
+function EmptyState() {
+  return (
+    <Card>
+      <CardContent className="grid gap-4 p-10 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-accent text-accent-foreground">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        <div className="grid gap-2">
+          <p className="text-xl font-semibold text-foreground">No interviews yet</p>
+          <p className="mx-auto max-w-md text-sm leading-6 text-muted-foreground">
+            Start your first session to build your history. Maya will track your readiness over time and
+            surface what&apos;s worth working on.
+          </p>
+        </div>
+        <Button asChild size="lg" className="mx-auto">
+          <Link href="/interview/new">
+            Start your first interview
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        </Button>
+      </CardContent>
+    </Card>
   );
 }

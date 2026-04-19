@@ -32,6 +32,13 @@ export type InterviewEvaluationResponse = {
   nextQuestion?: string;
 };
 
+export type InterviewSummaryResponse = {
+  summary: string;
+  overallScore: number;
+  strengths: string[];
+  improvements: string[];
+};
+
 export class AIResponseError extends Error {
   constructor(message: string) {
     super(message);
@@ -176,6 +183,67 @@ export async function generateInterviewQuestion(jdText: string, history: Array<{
   ]);
 
   return parseQuestionResponse(content);
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim())
+    .slice(0, 6);
+}
+
+function parseSummaryResponse(raw: string): InterviewSummaryResponse {
+  const parsed = extractJsonObject(raw);
+
+  if (!isRecord(parsed)) {
+    throw new AIResponseError("AI summary response must be a JSON object.");
+  }
+
+  return {
+    summary: readString(parsed.summary, "summary"),
+    overallScore: clampScore(parsed.overallScore),
+    strengths: toStringArray(parsed.strengths),
+    improvements: toStringArray(parsed.improvements),
+  };
+}
+
+export async function generateInterviewSummary(params: {
+  jdText: string;
+  title: string;
+  transcript: Array<{
+    question: string;
+    answer: string;
+    contentScore: number;
+    communicationScore: number;
+    confidenceScore: number;
+    feedback: string;
+  }>;
+}): Promise<InterviewSummaryResponse> {
+  const content = await callOpenRouter([
+    {
+      role: "system",
+      content:
+        "You are Maya, a warm but discerning HR interviewer wrapping up a mock interview. Write a concise post-interview report for the candidate. Return only valid JSON. Do not include markdown, code fences, or commentary.",
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task: "Write a final report based on the entire transcript and per-turn scores. Be specific, actionable, and grounded in the candidate's actual answers. The summary should be 3-5 sentences. Strengths and improvements should be 2-4 items each, short and concrete.",
+        interviewTitle: params.title,
+        jobDescription: params.jdText,
+        transcript: params.transcript,
+        outputSchema: {
+          summary: "string (3-5 sentences, second person)",
+          overallScore: "integer 0-10",
+          strengths: "array of short strings",
+          improvements: "array of short strings",
+        },
+      }),
+    },
+  ]);
+
+  return parseSummaryResponse(content);
 }
 
 export async function evaluateInterviewAnswer(params: {
