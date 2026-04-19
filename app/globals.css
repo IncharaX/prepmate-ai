@@ -3,6 +3,11 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --radius: 0.5rem;
+  --brand: #059669;
+  --brand-contrast: #ffffff;
+  --spark: #06b6d4;
+  --warm: #e11d48;
 }
 
 @theme inline {
