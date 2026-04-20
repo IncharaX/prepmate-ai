@@ -1,0 +1,29 @@
+{
+  "exportedAt": "2026-04-20T12:14:54.951Z",
+  "userCount": 3,
+  "sessionCount": 14,
+  "resultCount": 26,
+  "users": [
+    {
+      "id": "cmo5m5vtg000089wywitwv17a",
+      "name": "Demo Candidate",
+      "email": "demo@prepmate.ai",
+      "passwordHash": "",
+      "createdAt": "2026-04-19T10:19:03.124Z"
+    },
+    {
+      "id": "cmo64tgky0000pqxveeasz8n0",
+      "name": "Sathyam",
+      "email": "sathyam@gmail.com",
+      "passwordHash": "$2b$10$N4Kon63FX/vEc3a6A3tuReULWxS5tVnhGmZsKvcVZR6/nhrBdJsjO",
+      "createdAt": "2026-04-19T19:01:16.210Z"
+    },
+    {
+      "id": "cmo664khe000066g6emej4efl",
+      "name": "Inchara n k",
+      "email": "incharank1@gmail.com",
+      "passwordHash": "$2b$10$wsfJBpNNefJ1IWKUyEIGsuWJTR0kaL.B5GJOJG4WnLtKpt96GivPq",
+      "createdAt": "2026-04-19T19:37:54.098Z"
+    }
+  ]
+}

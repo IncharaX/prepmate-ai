@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowLeft, Sparkles } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 
@@ -13,12 +14,41 @@ export const metadata: Metadata = {
 };
 
 export default async function NewInterviewPage() {
-  await requireUser("/interview/new");
+  const user = await requireUser("/interview/new");
+
+  const [resumes, jobDescriptions] = await Promise.all([
+    prisma.resume.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        label: true,
+        fileName: true,
+        fileSizeBytes: true,
+        createdAt: true,
+      },
+    }),
+    prisma.jobDescription.findMany({
+      where: { userId: user.id },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        label: true,
+        companyName: true,
+        roleTitle: true,
+        rawText: true,
+        createdAt: true,
+      },
+    }),
+  ]);
 
   return (
     <div className="min-h-screen bg-hero-radial">
       <header className="flex items-center justify-between px-6 py-5 sm:px-10">
-        <Link href="/dashboard" className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground">
+        <Link
+          href="/dashboard"
+          className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
           <ArrowLeft className="h-4 w-4" />
           Back to dashboard
         </Link>
@@ -38,12 +68,18 @@ export default async function NewInterviewPage() {
           </div>
           <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Start a new interview</h1>
           <p className="max-w-xl text-sm leading-6 text-muted-foreground">
-            Paste the JD, name this session, pick how many questions you want, and choose whether you&apos;d
-            rather type or talk. Maya will take it from there.
+            Pick a resume and JD from your library — or add new ones inline. Choose how many
+            questions and whether you want to type or talk.
           </p>
         </div>
 
-        <NewInterviewForm />
+        <NewInterviewForm
+          initialResumes={resumes.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }))}
+          initialJobDescriptions={jobDescriptions.map((j) => ({
+            ...j,
+            createdAt: j.createdAt.toISOString(),
+          }))}
+        />
       </main>
     </div>
   );

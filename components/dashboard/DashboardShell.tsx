@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ClipboardList, LayoutDashboard, Sparkles } from "lucide-react";
+import { ClipboardList, FolderOpen, LayoutDashboard, Sparkles } from "lucide-react";
 
 import {
   MobileSidebarNav,
@@ -17,7 +17,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 
 import { UserMenu } from "./UserMenu";
 
-type NavKey = "dashboard" | "interview";
+type NavKey = "dashboard" | "library" | "interview";
 
 export function DashboardShell({
   user,
@@ -47,6 +47,10 @@ export function DashboardShell({
               <SidebarMenuButton href="/dashboard" data-active={active === "dashboard"}>
                 <LayoutDashboard className="h-4 w-4" />
                 Dashboard
+              </SidebarMenuButton>
+              <SidebarMenuButton href="/dashboard/library" data-active={active === "library"}>
+                <FolderOpen className="h-4 w-4" />
+                Library
               </SidebarMenuButton>
               <SidebarMenuButton href="/interview/new" data-active={active === "interview"}>
                 <ClipboardList className="h-4 w-4" />

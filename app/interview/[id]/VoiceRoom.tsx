@@ -6,7 +6,7 @@ import { ConversationProvider, useConversation } from "@elevenlabs/react";
 import { Loader2, Mic, PhoneOff, Phone } from "lucide-react";
 import { toast } from "sonner";
 
-import { endVoiceCallAction } from "@/app/actions/interview";
+import { endVoiceCallAction, markInterviewStartedAction } from "@/app/actions/interview";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,11 +14,11 @@ import { cn } from "@/lib/utils";
 
 type Props = {
   sessionId: string;
-  title: string;
-  candidateName: string;
-  plannedQuestions: number;
-  jd: string;
-  resume: string;
+};
+
+type SignedUrlResponse = {
+  signedUrl: string;
+  dynamicVariables: Record<string, string | number | boolean>;
 };
 
 type Phase = "idle" | "starting" | "live" | "finalizing" | "ended";
@@ -43,6 +43,9 @@ function VoiceRoomInner(props: Props) {
   const [error, setError] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<TranscriptMessage[]>([]);
   const conversationIdRef = React.useRef<string | null>(null);
+  // Guard so markInterviewStartedAction fires exactly once per connected call,
+  // even under React 19 StrictMode double-effects or reconnect flicker.
+  const startedRef = React.useRef<string | null>(null);
 
   const conversation = useConversation({
     onConnect: () => {
@@ -68,23 +71,33 @@ function VoiceRoomInner(props: Props) {
   const isSpeaking = Boolean(conversation.isSpeaking);
 
   // ElevenLabs assigns the conversation id during the handshake. Capture it as soon as
-  // the session is live so we can still recover it after the WebSocket tears down.
+  // the session is live so we can still recover it after the WebSocket tears down,
+  // and persist it on the InterviewSession row (status → in_progress).
   React.useEffect(() => {
     if (status !== "connected") return;
+    let convId: string | null = null;
     try {
       const id = conversation.getId?.();
       if (typeof id === "string" && id.length > 0) {
         conversationIdRef.current = id;
+        convId = id;
       }
     } catch {
       /* ignore */
     }
-  }, [status, conversation]);
+    if (!convId) return;
+    if (startedRef.current === convId) return;
+    startedRef.current = convId;
+    void markInterviewStartedAction({ sessionId: props.sessionId, conversationId: convId }).catch((err) => {
+      console.warn("markInterviewStartedAction failed", err);
+    });
+  }, [status, conversation, props.sessionId]);
 
   async function startCall() {
     setError(null);
     setMessages([]);
     conversationIdRef.current = null;
+    startedRef.current = null;
     setPhase("starting");
 
     try {
@@ -97,13 +110,21 @@ function VoiceRoomInner(props: Props) {
       return;
     }
 
-    let signedUrl: string;
+    let config: SignedUrlResponse;
     try {
-      const res = await fetch("/api/elevenlabs/signed-url", { cache: "no-store" });
-      if (!res.ok) throw new Error(`Signed URL error (${res.status})`);
-      const data = (await res.json()) as { signedUrl?: string; error?: string };
-      if (!data.signedUrl) throw new Error(data.error ?? "No signed URL");
-      signedUrl = data.signedUrl;
+      const res = await fetch("/api/elevenlabs/signed-url", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: props.sessionId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<SignedUrlResponse> & {
+        error?: string;
+      };
+      if (!res.ok || !data.signedUrl || !data.dynamicVariables) {
+        throw new Error(data.error ?? `Signed URL error (${res.status})`);
+      }
+      config = { signedUrl: data.signedUrl, dynamicVariables: data.dynamicVariables };
     } catch (err) {
       console.error(err);
       setPhase("idle");
@@ -115,16 +136,11 @@ function VoiceRoomInner(props: Props) {
 
     try {
       await conversation.startSession({
-        signedUrl,
-        dynamicVariables: {
-          candidate_name: props.candidateName,
-          interview_title: props.title,
-          planned_questions: props.plannedQuestions,
-          jd: props.jd,
-          resume: props.resume,
-        },
+        signedUrl: config.signedUrl,
+        dynamicVariables: config.dynamicVariables,
       } as Parameters<typeof conversation.startSession>[0]);
-      // The id is grabbed reactively when status flips to "connected" above.
+      // The id is grabbed reactively when status flips to "connected" above;
+      // the same effect also persists it via markInterviewStartedAction.
     } catch (err) {
       console.error(err);
       setPhase("idle");

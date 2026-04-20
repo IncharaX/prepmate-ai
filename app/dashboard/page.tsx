@@ -1,12 +1,16 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, ChevronRight, Clock, FileText, Sparkles } from "lucide-react";
+import { ArrowRight, ChevronRight, Clock, FileText, FolderOpen, Sparkles } from "lucide-react";
 
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { ReadinessCard } from "@/components/dashboard/ReadinessCard";
 import { ScoreTrendChart, type ScoreTrendPoint } from "@/components/dashboard/ScoreTrendChart";
+import {
+  RecommendationBadge,
+  type RecommendationValue,
+} from "@/components/report/RecommendationBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,18 +21,29 @@ export const metadata: Metadata = {
   title: "Dashboard",
 };
 
+type SessionStatus =
+  | "pending"
+  | "ready"
+  | "in_progress"
+  | "completed"
+  | "completed_partial"
+  | "failed"
+  | "abandoned";
+
 type SessionSummary = {
   id: string;
   title: string;
   createdAt: Date;
-  mode: "TEXT" | "VOICE";
-  status: "IN_PROGRESS" | "COMPLETED" | "ABANDONED";
-  plannedQuestions: number;
+  mode: "text" | "voice";
+  status: SessionStatus;
+  questionCount: number;
   answeredCount: number;
   content: number;
   communication: number;
   confidence: number;
   average: number;
+  recommendation: RecommendationValue | null;
+  overallScore: number | null;
 };
 
 function average(values: number[]) {
@@ -48,45 +63,65 @@ function formatDate(date: Date) {
   }).format(date);
 }
 
+const COMPLETED_STATUSES: SessionStatus[] = ["completed", "completed_partial"];
+
 export default async function DashboardPage() {
   const user = await requireUser("/dashboard");
 
   const sessions = await prisma.interviewSession.findMany({
     where: { userId: user.id },
-    include: { results: { orderBy: { order: "asc" } } },
+    include: {
+      resume: true,
+      jobDescription: true,
+      transcriptTurns: { orderBy: { turnIndex: "asc" } },
+      reportCards: {
+        where: { isCurrent: true },
+        take: 1,
+        select: {
+          scoreCommunication: true,
+          scoreJdRelevance: true,
+          scoreExperienceDepth: true,
+          scoreSpecificity: true,
+          scoreConfidence: true,
+          overallScore: true,
+          recommendation: true,
+        },
+      },
+    },
     orderBy: { createdAt: "desc" },
   });
 
   const summaries: SessionSummary[] = sessions.map((s) => {
-    const answered = s.results.filter((r) => r.answer !== "");
-    const content = roundScore(average(answered.map((r) => r.contentScore)));
-    const communication = roundScore(average(answered.map((r) => r.communicationScore)));
-    const confidence = roundScore(average(answered.map((r) => r.confidenceScore)));
+    const candidateTurns = s.transcriptTurns.filter((t) => t.speaker === "candidate");
+    const card = s.reportCards[0] ?? null;
+    const content = card?.scoreExperienceDepth ?? 0;
+    const communication = card?.scoreCommunication ?? 0;
+    const confidence = card?.scoreConfidence ?? 0;
     const avg = roundScore(average([content, communication, confidence]));
     return {
       id: s.id,
-      title: s.title,
+      title: s.jobDescription?.label ?? s.resume?.label ?? "Untitled interview",
       createdAt: s.createdAt,
       mode: s.mode,
       status: s.status,
-      plannedQuestions: s.plannedQuestions,
-      answeredCount: answered.length,
+      questionCount: s.questionCount,
+      answeredCount: candidateTurns.length,
       content,
       communication,
       confidence,
       average: avg,
+      recommendation: (card?.recommendation as RecommendationValue | undefined) ?? null,
+      overallScore: card?.overallScore ?? null,
     };
   });
 
-  const completed = summaries.filter((s) => s.status === "COMPLETED");
-  const chartData: ScoreTrendPoint[] = [...completed]
-    .reverse()
-    .map((s, index) => ({
-      label: `${index + 1}. ${formatDate(s.createdAt).split(",")[0]}`,
-      content: s.content,
-      communication: s.communication,
-      confidence: s.confidence,
-    }));
+  const completed = summaries.filter((s) => COMPLETED_STATUSES.includes(s.status));
+  const chartData: ScoreTrendPoint[] = [...completed].reverse().map((s, index) => ({
+    label: `${index + 1}. ${formatDate(s.createdAt).split(",")[0]}`,
+    content: s.content,
+    communication: s.communication,
+    confidence: s.confidence,
+  }));
 
   const answerCount = summaries.reduce((t, s) => t + s.answeredCount, 0);
   const readinessScore = roundScore(
@@ -149,8 +184,9 @@ export default async function DashboardPage() {
 }
 
 function SessionRow({ session }: { session: SessionSummary }) {
-  const href =
-    session.status === "COMPLETED" ? `/dashboard/interview/${session.id}` : `/interview/${session.id}`;
+  const href = COMPLETED_STATUSES.includes(session.status)
+    ? `/dashboard/interview/${session.id}`
+    : `/interview/${session.id}`;
   return (
     <li>
       <Link
@@ -162,7 +198,7 @@ function SessionRow({ session }: { session: SessionSummary }) {
             <p className="truncate text-sm font-semibold text-foreground">{session.title}</p>
             <StatusBadge status={session.status} />
             <Badge variant="outline" className="font-normal">
-              {session.mode === "VOICE" ? "Voice" : "Text"}
+              {session.mode === "voice" ? "Voice" : "Text"}
             </Badge>
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -172,12 +208,19 @@ function SessionRow({ session }: { session: SessionSummary }) {
             </span>
             <span className="inline-flex items-center gap-1">
               <FileText className="h-3 w-3" />
-              {session.answeredCount} / {session.plannedQuestions} answered
+              {session.answeredCount} / {session.questionCount} answered
             </span>
           </div>
         </div>
         <div className="flex items-center gap-4">
-          {session.status === "COMPLETED" ? (
+          {COMPLETED_STATUSES.includes(session.status) && session.recommendation ? (
+            <div className="hidden flex-col items-end gap-0.5 sm:flex">
+              <RecommendationBadge value={session.recommendation} size="sm" />
+              <p className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                {session.overallScore ?? session.average} / 100
+              </p>
+            </div>
+          ) : COMPLETED_STATUSES.includes(session.status) ? (
             <div className="hidden text-right sm:block">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Avg</p>
               <p className="text-xl font-bold text-gradient-primary">{session.average}</p>
@@ -190,9 +233,13 @@ function SessionRow({ session }: { session: SessionSummary }) {
   );
 }
 
-function StatusBadge({ status }: { status: SessionSummary["status"] }) {
-  if (status === "COMPLETED") return <Badge variant="success">Completed</Badge>;
-  if (status === "IN_PROGRESS") return <Badge variant="muted">In progress</Badge>;
+function StatusBadge({ status }: { status: SessionStatus }) {
+  if (status === "completed") return <Badge variant="success">Completed</Badge>;
+  if (status === "completed_partial") return <Badge variant="muted">Completed (partial)</Badge>;
+  if (status === "in_progress") return <Badge variant="muted">In progress</Badge>;
+  if (status === "ready") return <Badge variant="muted">Ready</Badge>;
+  if (status === "pending") return <Badge variant="outline">Preparing…</Badge>;
+  if (status === "failed") return <Badge variant="destructive">Prep failed</Badge>;
   return <Badge variant="outline">Abandoned</Badge>;
 }
 
@@ -210,12 +257,20 @@ function EmptyState() {
             surface what&apos;s worth working on.
           </p>
         </div>
-        <Button asChild size="lg" className="mx-auto">
-          <Link href="/interview/new">
-            Start your first interview
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        </Button>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Button asChild size="lg">
+            <Link href="/interview/new">
+              Start your first interview
+              <ArrowRight className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button asChild size="lg" variant="outline">
+            <Link href="/dashboard/library">
+              <FolderOpen className="h-4 w-4" />
+              Browse your library
+            </Link>
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

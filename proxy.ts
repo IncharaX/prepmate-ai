@@ -7,6 +7,13 @@ const AUTH_ROUTES = ["/login", "/signup"];
 
 export default async function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+
+  // Public shareable report pages live at /report/[token]. Auth-gating them
+  // would break the whole feature — anyone with the URL can read the report.
+  if (pathname.startsWith("/report/")) {
+    return NextResponse.next();
+  }
+
   const session = await auth();
   const isAuthed = Boolean(session?.user);
 

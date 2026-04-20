@@ -1,28 +1,27 @@
 "use server";
 
+import { after } from "next/server";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
+import { evaluateInterviewSession } from "@/app/actions/evaluate";
 import { requireUser } from "@/lib/auth";
-import {
-  evaluateInterviewAnswer,
-  generateInterviewQuestion,
-  generateInterviewSummary,
-} from "@/lib/ai";
 import { fetchElevenLabsConversation, parseTurnsIntoQA } from "@/lib/elevenlabs";
 import { prisma } from "@/lib/prisma";
 import { startInterviewSchema, submitAnswerSchema } from "@/lib/validation";
 
-export type StartInterviewFormState = {
-  fieldErrors?: {
-    title?: string[];
-    jdText?: string[];
-    resume?: string[];
-    numQuestions?: string[];
-    mode?: string[];
-  };
-  message?: string;
-} | undefined;
+export type StartInterviewFormState =
+  | {
+      fieldErrors?: {
+        title?: string[];
+        resumeId?: string[];
+        jobDescriptionId?: string[];
+        numQuestions?: string[];
+        mode?: string[];
+      };
+      message?: string;
+    }
+  | undefined;
 
 export async function startInterviewAction(
   _prev: StartInterviewFormState,
@@ -32,8 +31,8 @@ export async function startInterviewAction(
 
   const parsed = startInterviewSchema.safeParse({
     title: formData.get("title"),
-    jdText: formData.get("jdText"),
-    resume: formData.get("resume"),
+    resumeId: formData.get("resumeId"),
+    jobDescriptionId: formData.get("jobDescriptionId"),
     numQuestions: Number(formData.get("numQuestions")),
     mode: formData.get("mode"),
   });
@@ -42,47 +41,46 @@ export async function startInterviewAction(
     return { fieldErrors: parsed.error.flatten().fieldErrors };
   }
 
-  const { title, jdText, resume, numQuestions, mode } = parsed.data;
+  const { title, resumeId, jobDescriptionId, numQuestions, mode } = parsed.data;
+
+  // Ownership gate: both library entries must belong to this user (and not be
+  // soft-deleted — the prisma extension's findFirst filter handles that).
+  const [resumeRow, jdRow] = await Promise.all([
+    prisma.resume.findFirst({ where: { id: resumeId, userId: user.id }, select: { id: true } }),
+    prisma.jobDescription.findFirst({
+      where: { id: jobDescriptionId, userId: user.id },
+      select: { id: true },
+    }),
+  ]);
+
+  if (!resumeRow) {
+    return { fieldErrors: { resumeId: ["That resume isn't in your library."] } };
+  }
+  if (!jdRow) {
+    return { fieldErrors: { jobDescriptionId: ["That job description isn't in your library."] } };
+  }
 
   const session = await prisma.interviewSession.create({
     data: {
       userId: user.id,
-      title,
-      domain: "JD-based Interview",
-      resumeText: jdText,
-      resume,
-      plannedQuestions: numQuestions,
+      resumeId: resumeRow.id,
+      jobDescriptionId: jdRow.id,
+      questionCount: numQuestions,
       mode,
+      // Voice sessions go through the /prepare page (planner LLM runs there)
+      // before the candidate sees the call room. Text mode is still stubbed
+      // and skips prep.
+      status: mode === "text" ? "in_progress" : "pending",
     },
   });
 
-  // For text mode, pre-generate the first question so the [id] page has one to show.
-  // Voice mode is handled by ElevenLabs — no pre-generation needed.
-  if (mode === "TEXT") {
-    try {
-      const generated = await generateInterviewQuestion(jdText);
-      await prisma.interviewResult.create({
-        data: {
-          sessionId: session.id,
-          order: 0,
-          question: generated.question,
-          answer: "",
-          contentScore: 0,
-          communicationScore: 0,
-          confidenceScore: 0,
-          feedback: "",
-        },
-      });
-    } catch (error) {
-      console.error("Failed to generate first question", error);
-      // Clean up the orphaned session.
-      await prisma.interviewSession.delete({ where: { id: session.id } });
-      return { message: "Maya couldn't start right now. Please try again in a moment." };
-    }
-  }
+  // The interview title is captured on the session indirectly via the JD/Resume
+  // labels. For now we don't persist a session-level title override; when users
+  // want one, add a `title` column back on interview_sessions in a later phase.
+  void title;
 
   revalidatePath("/dashboard");
-  redirect(`/interview/${session.id}`);
+  redirect(mode === "voice" ? `/interview/${session.id}/prepare` : `/interview/${session.id}`);
 }
 
 export type SubmitAnswerResult =
@@ -90,139 +88,24 @@ export type SubmitAnswerResult =
   | { ok: true; completed: true; redirectTo: string }
   | { ok: false; message: string };
 
+/**
+ * NOT YET IMPLEMENTED POST-V2. Text-mode turn submission needs to be rebuilt
+ * against TranscriptTurn + ReportCard. Stubbed so the build passes; see
+ * prisma/migrations-plan.md for the next-session scope.
+ */
 export async function submitAnswerAction(input: {
   sessionId: string;
   answer: string;
 }): Promise<SubmitAnswerResult> {
-  const user = await requireUser();
-
+  await requireUser();
   const parsed = submitAnswerSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, message: parsed.error.issues[0]?.message ?? "Invalid input." };
   }
-
-  const { sessionId, answer } = parsed.data;
-
-  const session = await prisma.interviewSession.findUnique({
-    where: { id: sessionId },
-    include: { results: { orderBy: { order: "asc" } } },
-  });
-
-  if (!session || session.userId !== user.id) {
-    return { ok: false, message: "Interview not found." };
-  }
-
-  if (session.status === "COMPLETED") {
-    return { ok: true, completed: true, redirectTo: `/dashboard/interview/${session.id}` };
-  }
-
-  const pending = session.results.find((r) => r.answer === "");
-  if (!pending) {
-    return { ok: false, message: "No active question. Please refresh." };
-  }
-
-  const answeredHistory = session.results
-    .filter((r) => r.answer !== "")
-    .map((r) => ({ question: r.question, answer: r.answer }));
-
-  const answeredCount = answeredHistory.length + 1;
-  const shouldAskNextQuestion = answeredCount < session.plannedQuestions;
-
-  let evaluation;
-  try {
-    evaluation = await evaluateInterviewAnswer({
-      jdText: session.resumeText,
-      resume: session.resume ?? undefined,
-      question: pending.question,
-      answer,
-      history: answeredHistory,
-      shouldAskNextQuestion,
-    });
-  } catch (error) {
-    console.error("evaluateInterviewAnswer failed", error);
-    return { ok: false, message: "Maya couldn't score that answer. Please try again." };
-  }
-
-  await prisma.interviewResult.update({
-    where: { id: pending.id },
-    data: {
-      answer,
-      contentScore: evaluation.score.content,
-      communicationScore: evaluation.score.communication,
-      confidenceScore: evaluation.score.confidence,
-      feedback: evaluation.feedback,
-    },
-  });
-
-  if (!shouldAskNextQuestion) {
-    const finalResults = await prisma.interviewResult.findMany({
-      where: { sessionId: session.id },
-      orderBy: { order: "asc" },
-    });
-
-    let summary;
-    try {
-      summary = await generateInterviewSummary({
-        jdText: session.resumeText,
-        title: session.title,
-        transcript: finalResults.map((r) => ({
-          question: r.question,
-          answer: r.answer,
-          contentScore: r.contentScore,
-          communicationScore: r.communicationScore,
-          confidenceScore: r.confidenceScore,
-          feedback: r.feedback,
-        })),
-      });
-    } catch (error) {
-      console.error("generateInterviewSummary failed", error);
-      summary = {
-        summary:
-          "Your session is saved. Maya couldn't auto-generate a summary this time — review your per-answer feedback below.",
-        overallScore: Math.round(
-          finalResults.reduce(
-            (acc, r) => acc + (r.contentScore + r.communicationScore + r.confidenceScore) / 3,
-            0,
-          ) / Math.max(finalResults.length, 1),
-        ),
-        strengths: [],
-        improvements: [],
-      };
-    }
-
-    await prisma.interviewSession.update({
-      where: { id: session.id },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        summary,
-      },
-    });
-
-    revalidatePath("/dashboard");
-    return { ok: true, completed: true, redirectTo: `/dashboard/interview/${session.id}` };
-  }
-
-  const nextQuestionText = evaluation.nextQuestion ?? "";
-  if (!nextQuestionText) {
-    return { ok: false, message: "Maya didn't return a next question. Please try again." };
-  }
-
-  const nextOrder = pending.order + 1;
-  await prisma.interviewResult.create({
-    data: {
-      sessionId: session.id,
-      order: nextOrder,
-      question: nextQuestionText,
-      answer: "",
-      contentScore: 0,
-      communicationScore: 0,
-      confidenceScore: 0,
-      feedback: "",
-    },
-  });
-
-  return { ok: true, completed: false, question: nextQuestionText, orderIndex: nextOrder };
+  return {
+    ok: false,
+    message: "Text-mode interviews are temporarily offline after the schema v2 migration. Use voice mode.",
+  };
 }
 
 export type EndVoiceCallResult =
@@ -230,9 +113,9 @@ export type EndVoiceCallResult =
   | { ok: false; message: string };
 
 /**
- * Fast path: fetch the ElevenLabs transcript, persist raw Q/A pairs with placeholder
- * scores, mark session COMPLETED, return redirect. Scoring + summary run separately
- * via scoreVoiceSessionAction so the UI doesn't hang on minutes of serial LLM calls.
+ * Fast path: fetch the ElevenLabs transcript, persist raw turns, mark session
+ * COMPLETED. Evaluation (Phase 6) is kicked off via `after()` so the caller's
+ * redirect isn't blocked on the multi-LLM scoring pass.
  */
 export async function endVoiceCallAction(input: {
   sessionId: string;
@@ -248,13 +131,13 @@ export async function endVoiceCallAction(input: {
     return { ok: false, message: "Interview not found." };
   }
 
-  if (session.status === "COMPLETED") {
+  if (session.status === "completed" || session.status === "completed_partial") {
     return { ok: true, redirectTo: `/dashboard/interview/${session.id}` };
   }
 
   await prisma.interviewSession.update({
     where: { id: session.id },
-    data: { elevenLabsConvId: input.conversationId },
+    data: { elevenlabsConversationId: input.conversationId },
   });
 
   let conversation;
@@ -262,7 +145,10 @@ export async function endVoiceCallAction(input: {
     conversation = await fetchElevenLabsConversation(input.conversationId);
   } catch (error) {
     console.error("fetchElevenLabsConversation failed", error);
-    return { ok: false, message: "Couldn't pull the call transcript. Please try again in a minute." };
+    return {
+      ok: false,
+      message: "Couldn't pull the call transcript. Please try again in a minute.",
+    };
   }
 
   const qa = parseTurnsIntoQA(conversation.transcript);
@@ -270,255 +156,119 @@ export async function endVoiceCallAction(input: {
   if (qa.length === 0) {
     await prisma.interviewSession.update({
       where: { id: session.id },
-      data: { status: "ABANDONED" },
+      data: { status: "abandoned" },
     });
     return { ok: false, message: "No answers were recorded during the call." };
   }
 
-  await prisma.interviewResult.deleteMany({ where: { sessionId: session.id } });
-  await prisma.interviewResult.createMany({
-    data: qa.map((pair, i) => ({
+  // TranscriptTurn: one old Q/A pair becomes two rows (interviewer + candidate).
+  await prisma.transcriptTurn.deleteMany({ where: { sessionId: session.id } });
+  const turns: Array<{
+    sessionId: string;
+    turnIndex: number;
+    speaker: "interviewer" | "candidate";
+    content: string;
+    startMs: number;
+    endMs: number;
+    questionIndex: number;
+  }> = [];
+  qa.forEach((pair, i) => {
+    turns.push({
       sessionId: session.id,
-      order: i,
-      question: pair.question,
-      answer: pair.answer,
-      contentScore: 0,
-      communicationScore: 0,
-      confidenceScore: 0,
-      feedback: "",
-    })),
+      turnIndex: 2 * i,
+      speaker: "interviewer",
+      content: pair.question,
+      startMs: 0,
+      endMs: 0,
+      questionIndex: i,
+    });
+    turns.push({
+      sessionId: session.id,
+      turnIndex: 2 * i + 1,
+      speaker: "candidate",
+      content: pair.answer,
+      startMs: 0,
+      endMs: 0,
+      questionIndex: i,
+    });
   });
+  await prisma.transcriptTurn.createMany({ data: turns });
 
   await prisma.interviewSession.update({
     where: { id: session.id },
     data: {
-      status: "COMPLETED",
-      completedAt: new Date(),
+      status: "completed",
+      callEndedAt: new Date(),
     },
+  });
+
+  // Fire-and-forget — runs AFTER the redirect is sent, so the user lands on
+  // the detail page immediately. The EvaluationPoller client polls and also
+  // defensively kicks this if it somehow doesn't run (cold lambda, crash).
+  after(async () => {
+    await evaluateInterviewSession(session.id).catch((err) => {
+      console.error("evaluateInterviewSession (after) failed", err);
+    });
   });
 
   revalidatePath("/dashboard");
   return { ok: true, redirectTo: `/dashboard/interview/${session.id}` };
 }
 
-export type ScoreVoiceSessionResult = { ok: true } | { ok: false; message: string };
+export type MarkStartedResult = { ok: true } | { ok: false; message: string };
 
 /**
- * Idempotent: exits immediately if summary is already set. Parallelizes per-turn
- * evaluation via Promise.allSettled so one slow/failed LLM call doesn't stall the
- * rest. Writes scores + feedback per row, generates final summary.
+ * Called from the voice client the moment the WebRTC connection flips to
+ * "connected". Transitions `ready → in_progress`, stamps callStartedAt, and
+ * records the ElevenLabs conversation_id on the session. Idempotent: repeated
+ * calls (StrictMode, reconnect) are a safe no-op as long as the session is
+ * already in a later state.
  */
-export async function scoreVoiceSessionAction(
-  sessionId: string,
-): Promise<ScoreVoiceSessionResult> {
+export async function markInterviewStartedAction(input: {
+  sessionId: string;
+  conversationId: string;
+}): Promise<MarkStartedResult> {
   const user = await requireUser();
-
   const session = await prisma.interviewSession.findUnique({
-    where: { id: sessionId },
-    include: { results: { orderBy: { order: "asc" } } },
+    where: { id: input.sessionId },
   });
-
   if (!session || session.userId !== user.id) {
     return { ok: false, message: "Interview not found." };
   }
+  if (session.mode !== "voice") {
+    return { ok: false, message: "Voice-only transition." };
+  }
 
-  if (session.summary) {
+  // Idempotent cases — already started or past.
+  const isFinal =
+    session.status === "completed" ||
+    session.status === "completed_partial" ||
+    session.status === "failed" ||
+    session.status === "abandoned";
+  if (isFinal) return { ok: true };
+
+  if (session.status === "in_progress") {
+    // Backfill the conversationId if we somehow lost it earlier but don't
+    // stomp a value that's already set.
+    if (!session.elevenlabsConversationId && input.conversationId) {
+      await prisma.interviewSession.update({
+        where: { id: session.id },
+        data: { elevenlabsConversationId: input.conversationId },
+      });
+    }
     return { ok: true };
   }
 
-  const qa = session.results
-    .filter((r) => r.answer !== "")
-    .map((r) => ({ id: r.id, question: r.question, answer: r.answer }));
-
-  if (qa.length === 0) {
-    return { ok: false, message: "No answers to score." };
-  }
-
-  type Scored = {
-    id: string;
-    question: string;
-    answer: string;
-    contentScore: number;
-    communicationScore: number;
-    confidenceScore: number;
-    feedback: string;
-    evaluated: boolean;
-  };
-
-  const scored: Scored[] = await runWithConcurrency(
-    qa,
-    3,
-    async (pair, i) => {
-      const history = qa.slice(0, i).map(({ question, answer }) => ({ question, answer }));
-      const attempt = () =>
-        evaluateInterviewAnswer({
-          jdText: session.resumeText,
-          resume: session.resume ?? undefined,
-          question: pair.question,
-          answer: pair.answer,
-          history,
-          shouldAskNextQuestion: false,
-        });
-
-      try {
-        const evalResult = await attempt();
-        return {
-          id: pair.id,
-          question: pair.question,
-          answer: pair.answer,
-          contentScore: evalResult.score.content,
-          communicationScore: evalResult.score.communication,
-          confidenceScore: evalResult.score.confidence,
-          feedback: evalResult.feedback,
-          evaluated: true,
-        };
-      } catch (firstError) {
-        console.warn(
-          `evaluateInterviewAnswer failed for turn ${i} (first attempt)`,
-          firstError instanceof Error ? firstError.message : firstError,
-        );
-        await new Promise((r) => setTimeout(r, 750 + Math.random() * 750));
-        try {
-          const evalResult = await attempt();
-          return {
-            id: pair.id,
-            question: pair.question,
-            answer: pair.answer,
-            contentScore: evalResult.score.content,
-            communicationScore: evalResult.score.communication,
-            confidenceScore: evalResult.score.confidence,
-            feedback: evalResult.feedback,
-            evaluated: true,
-          };
-        } catch (secondError) {
-          console.error(
-            `evaluateInterviewAnswer failed for turn ${i} (retry)`,
-            secondError instanceof Error ? secondError.message : secondError,
-          );
-          return {
-            id: pair.id,
-            question: pair.question,
-            answer: pair.answer,
-            contentScore: 0,
-            communicationScore: 0,
-            confidenceScore: 0,
-            feedback: "",
-            evaluated: false,
-          };
-        }
-      }
-    },
-  );
-
-  await Promise.all(
-    scored.map((row) =>
-      prisma.interviewResult.update({
-        where: { id: row.id },
-        data: {
-          contentScore: row.contentScore,
-          communicationScore: row.communicationScore,
-          confidenceScore: row.confidenceScore,
-          feedback: row.feedback,
-        },
-      }),
-    ),
-  );
-
-  const successCount = scored.filter((r) => r.evaluated).length;
-  const mostlyFailed = successCount < Math.ceil(scored.length / 2);
-
-  let summary;
-  if (mostlyFailed) {
-    console.error(
-      `scoring mostly failed for session ${sessionId}: ${successCount}/${scored.length} turns evaluated`,
-    );
-    summary = {
-      summary:
-        "We couldn't grade this session reliably — too many of Maya's evaluation calls failed. The full transcript is below. Try running another interview; if this keeps happening, your AI provider may be rate-limiting requests.",
-      overallScore: 0,
-      strengths: [],
-      improvements: [],
-      partial: true,
-      successCount,
-      totalTurns: scored.length,
-    };
-  } else {
-    try {
-      const generated = await generateInterviewSummary({
-        jdText: session.resumeText,
-        title: session.title,
-        transcript: scored.filter((r) => r.evaluated),
-      });
-      summary = {
-        ...generated,
-        partial: successCount < scored.length,
-        successCount,
-        totalTurns: scored.length,
-      };
-    } catch (error) {
-      console.error("summary generation failed", error);
-      const evaluatedRows = scored.filter((r) => r.evaluated);
-      const avg = Math.round(
-        evaluatedRows.reduce(
-          (acc, r) => acc + (r.contentScore + r.communicationScore + r.confidenceScore) / 3,
-          0,
-        ) / Math.max(evaluatedRows.length, 1),
-      );
-      summary = {
-        summary:
-          "Your transcript is saved below. Maya couldn't write a summary this time — the AI provider may be temporarily unavailable.",
-        overallScore: avg,
-        strengths: [],
-        improvements: [],
-        partial: true,
-        successCount,
-        totalTurns: scored.length,
-      };
-    }
-  }
-
   await prisma.interviewSession.update({
-    where: { id: sessionId },
-    data: { summary },
+    where: { id: session.id },
+    data: {
+      status: "in_progress",
+      callStartedAt: new Date(),
+      elevenlabsConversationId: input.conversationId,
+    },
   });
 
-  revalidatePath(`/dashboard/interview/${sessionId}`);
-  revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/interview/${session.id}`);
   return { ok: true };
 }
 
-/**
- * Runs an async mapper over items with bounded concurrency, preserving input order.
- * We use this for per-turn LLM scoring so we don't hammer OpenRouter with N parallel
- * requests and get rate-limited into silent failures.
- */
-async function runWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  mapper: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
-      const i = cursor;
-      cursor += 1;
-      if (i >= items.length) return;
-      results[i] = await mapper(items[i], i);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
-export async function abandonInterviewAction(sessionId: string) {
-  const user = await requireUser();
-  const session = await prisma.interviewSession.findUnique({ where: { id: sessionId } });
-  if (!session || session.userId !== user.id) return;
-  if (session.status !== "IN_PROGRESS") return;
-  await prisma.interviewSession.update({
-    where: { id: sessionId },
-    data: { status: "ABANDONED" },
-  });
-  revalidatePath("/dashboard");
-}

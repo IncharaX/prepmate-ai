@@ -15,7 +15,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 type Props = {
   sessionId: string;
-  mode: "TEXT" | "VOICE";
+  mode: "text" | "voice";
   plannedQuestions: number;
   answeredCount: number;
   currentQuestion: string;

@@ -25,20 +25,16 @@ export const startInterviewSchema = z.object({
     .min(2, { message: "Give this interview a short title." })
     .max(80, { message: "Title is too long." })
     .trim(),
-  jdText: z
+  resumeId: z.string().uuid({ message: "Pick a resume from your library." }),
+  jobDescriptionId: z
     .string()
-    .min(40, { message: "Paste the full job description (at least 40 characters)." })
-    .max(20000, { message: "JD is too long." }),
-  resume: z
-    .string()
-    .min(40, { message: "Paste your resume (at least 40 characters)." })
-    .max(20000, { message: "Resume is too long." }),
+    .uuid({ message: "Pick a job description from your library." }),
   numQuestions: z
     .number()
     .int()
     .min(1, { message: "Choose at least 1 question." })
     .max(10, { message: "Maximum 10 questions." }),
-  mode: z.enum(["TEXT", "VOICE"]),
+  mode: z.enum(["text", "voice"]),
 });
 
 export const submitAnswerSchema = z.object({

@@ -28,19 +28,30 @@ export default async function LiveInterviewPage({
 
   const session = await prisma.interviewSession.findUnique({
     where: { id },
-    include: { results: { orderBy: { order: "asc" } } },
+    include: {
+      resume: true,
+      jobDescription: true,
+      transcriptTurns: { orderBy: { turnIndex: "asc" } },
+    },
   });
 
   if (!session || session.userId !== user.id) {
     notFound();
   }
 
-  if (session.status === "COMPLETED") {
+  if (session.status === "completed" || session.status === "completed_partial") {
     redirect(`/dashboard/interview/${session.id}`);
   }
 
-  const answeredCount = session.results.filter((r) => r.answer !== "").length;
-  const pending = session.results.find((r) => r.answer === "");
+  // Voice sessions route through /prepare before the call room. If someone
+  // lands here directly while prep hasn't finished (or failed), bounce them.
+  if (session.mode === "voice" && (session.status === "pending" || session.status === "failed")) {
+    redirect(`/interview/${session.id}/prepare`);
+  }
+
+  const candidateTurns = session.transcriptTurns.filter((t) => t.speaker === "candidate");
+  const answeredCount = candidateTurns.length;
+  const title = session.jobDescription?.label ?? session.resume?.label ?? "Untitled interview";
 
   const header = (
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 bg-card/50 px-6 py-4 backdrop-blur sm:px-10">
@@ -53,47 +64,38 @@ export default async function LiveInterviewPage({
         </Button>
         <div className="hidden h-6 w-px bg-border sm:block" />
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">{session.title}</p>
+          <p className="truncate text-sm font-semibold text-foreground">{title}</p>
           <p className="text-xs text-muted-foreground">
-            Interview with Maya · {session.mode === "VOICE" ? "Voice call" : "Text"} mode
+            Interview with Maya · {session.mode === "voice" ? "Voice call" : "Text"} mode
           </p>
         </div>
       </div>
       <div className="flex items-center gap-2">
-        {session.mode === "TEXT" ? (
+        {session.mode === "text" ? (
           <Badge variant="muted">
-            Question {answeredCount + 1} of {session.plannedQuestions}
+            Question {answeredCount + 1} of {session.questionCount}
           </Badge>
         ) : (
-          <Badge variant="muted">{session.plannedQuestions} question target</Badge>
+          <Badge variant="muted">{session.questionCount} question target</Badge>
         )}
         <ThemeToggle />
       </div>
     </header>
   );
 
-  if (session.mode === "VOICE") {
+  if (session.mode === "voice") {
     return (
       <div className="min-h-screen bg-hero-radial">
         {header}
         <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
-          <VoiceRoom
-            sessionId={session.id}
-            title={session.title}
-            candidateName={user.name?.split(" ")[0] ?? "there"}
-            plannedQuestions={session.plannedQuestions}
-            jd={session.resumeText}
-            resume={session.resume ?? ""}
-          />
+          <VoiceRoom sessionId={session.id} />
         </main>
       </div>
     );
   }
 
-  if (!pending) {
-    redirect(`/dashboard/interview/${session.id}`);
-  }
-
+  // Text mode is temporarily offline post-schema-v2 (see app/actions/interview.ts).
+  // Render a placeholder until the text flow is rebuilt.
   return (
     <div className="min-h-screen bg-hero-radial">
       {header}
@@ -101,10 +103,12 @@ export default async function LiveInterviewPage({
         <InterviewRoom
           sessionId={session.id}
           mode={session.mode}
-          plannedQuestions={session.plannedQuestions}
+          plannedQuestions={session.questionCount}
           answeredCount={answeredCount}
-          currentQuestion={pending.question}
-          currentOrder={pending.order}
+          currentQuestion={
+            "Text mode is temporarily offline after the schema v2 migration. Please switch to voice mode from /interview/new."
+          }
+          currentOrder={answeredCount}
         />
       </main>
     </div>

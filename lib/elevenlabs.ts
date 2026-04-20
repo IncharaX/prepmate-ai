@@ -78,6 +78,26 @@ export async function fetchElevenLabsConversation(conversationId: string) {
   throw new Error("Timed out waiting for ElevenLabs conversation transcript.");
 }
 
+/**
+ * Truncate to at most `max` characters, cutting at the last whitespace boundary
+ * when possible. Returns the original string unchanged if it's already short
+ * enough. When truncation happens, appends `"… [truncated]"` so the LLM knows
+ * the input was abbreviated rather than the candidate being terse.
+ */
+export function truncateAtWord(text: string, max: number): string {
+  const trimmed = (text ?? "").trim();
+  if (trimmed.length <= max) return trimmed;
+
+  // Try to break at the last whitespace within the limit. Leave ≥80% of the
+  // budget intact so we don't end up with a ridiculously short fragment when
+  // the last space happens to be near the start.
+  const hardCut = trimmed.slice(0, max);
+  const lastSpace = hardCut.search(/\s\S*$/);
+  const minKeep = Math.floor(max * 0.8);
+  const cutAt = lastSpace >= minKeep ? lastSpace : max;
+  return `${trimmed.slice(0, cutAt).trimEnd()}… [truncated]`;
+}
+
 export type TranscriptTurn = { role: "user" | "agent"; message: string };
 
 export function parseTurnsIntoQA(

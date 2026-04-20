@@ -1,3 +1,6 @@
+// PrepMate AI — production schema (v2).
+// Generated 2026-04-20. See prisma/migrations-plan.md + docs/AUDIT.md.
+
 generator client {
   provider = "prisma-client"
   output   = "../lib/generated/prisma"
@@ -5,61 +8,382 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // url      = env("DATABASE_URL")
 }
+
+// =====================================================
+// ENUMS
+// =====================================================
 
 enum InterviewMode {
-  TEXT
-  VOICE
+  text
+  voice
 }
 
-enum InterviewStatus {
-  IN_PROGRESS
-  COMPLETED
-  ABANDONED
+enum InterviewType {
+  hr_screen
+  behavioral
+  technical_screen
+  mixed
 }
+
+enum InterviewDifficulty {
+  entry
+  mid
+  senior
+}
+
+enum SessionStatus {
+  pending
+  ready
+  in_progress
+  completed
+  completed_partial
+  failed
+  abandoned
+}
+
+enum SpeakerRole {
+  interviewer
+  candidate
+}
+
+enum Recommendation {
+  strong_yes
+  yes
+  maybe
+  no
+  strong_no
+}
+
+enum FitStatus {
+  met
+  partial
+  unclear
+  not_shown
+}
+
+enum LlmPurpose {
+  resume_parse
+  jd_parse
+  interview_prep
+  evaluation
+  question_evaluation
+  jd_fit_analysis
+  other
+}
+
+// =====================================================
+// USERS & AUTH
+// =====================================================
 
 model User {
-  id           String             @id @default(cuid())
-  name         String
-  email        String             @unique
-  passwordHash String             @default("")
-  createdAt    DateTime           @default(now())
-  sessions     InterviewSession[]
+  id            String  @id @default(uuid()) @db.Uuid
+  email         String  @unique
+  passwordHash  String  @map("password_hash")
+  name          String?
+  emailVerified Boolean @default(false) @map("email_verified")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  authSessions      AuthSession[]
+  resumes           Resume[]
+  jobDescriptions   JobDescription[]
+  interviewSessions InterviewSession[]
+  llmCalls          LlmCall[]
+
+  @@map("users")
 }
 
-model InterviewSession {
-  id               String            @id @default(cuid())
-  userId           String
-  title            String            @default("Interview")
-  domain           String
-  resumeText       String            @db.Text // legacy name — stores JD
-  resume           String?           @db.Text // candidate's resume
-  elevenLabsConvId String?
-  mode             InterviewMode     @default(TEXT)
-  plannedQuestions Int               @default(7)
-  status           InterviewStatus   @default(IN_PROGRESS)
-  summary          Json?
-  completedAt      DateTime?
-  createdAt        DateTime          @default(now())
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  results          InterviewResult[]
+model AuthSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  expiresAt  DateTime  @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@map("auth_sessions")
 }
 
-model InterviewResult {
-  id                 String           @id @default(cuid())
-  sessionId          String
-  order              Int              @default(0)
-  question           String           @db.Text
-  answer             String           @db.Text
-  contentScore       Int
-  communicationScore Int
-  confidenceScore    Int
-  feedback           String           @db.Text
-  createdAt          DateTime         @default(now())
-  session            InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+// =====================================================
+// RESUMES (reusable library)
+// =====================================================
+
+model Resume {
+  id            String  @id @default(uuid()) @db.Uuid
+  userId        String  @map("user_id") @db.Uuid
+  label         String
+  // File fields are nullable — blob storage is not yet wired. See
+  // prisma/migrations-plan.md §0.4. Legacy / paste-only resumes leave these null.
+  fileUrl       String? @map("file_url")
+  fileName      String? @map("file_name")
+  fileSizeBytes Int?    @map("file_size_bytes")
+  extractedText String  @map("extracted_text")
+  parsedData    Json?   @map("parsed_data")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interviewSessions InterviewSession[]
+
+  @@index([userId])
+  @@map("resumes")
+}
+
+// =====================================================
+// JOB DESCRIPTIONS (reusable library)
+// =====================================================
+
+model JobDescription {
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @map("user_id") @db.Uuid
+  label       String
+  companyName String? @map("company_name")
+  roleTitle   String? @map("role_title")
+  rawText     String  @map("raw_text")
+  parsedData  Json?   @map("parsed_data")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interviewSessions InterviewSession[]
+
+  @@index([userId])
+  @@map("job_descriptions")
+}
+
+// =====================================================
+// INTERVIEW SESSIONS
+// =====================================================
+
+model InterviewSession {
+  id               String @id @default(uuid()) @db.Uuid
+  userId           String @map("user_id") @db.Uuid
+  resumeId         String @map("resume_id") @db.Uuid
+  jobDescriptionId String @map("job_description_id") @db.Uuid
+
+  questionCount Int                 @map("question_count")
+  interviewType InterviewType       @default(hr_screen) @map("interview_type")
+  difficulty    InterviewDifficulty @default(mid)
+  // Kept alongside type/difficulty so we can branch TEXT vs VOICE rendering
+  // without implicit state. See prisma/migrations-plan.md §0.3 (Option A).
+  mode          InterviewMode       @default(voice)
+
+  // pre-call prep (from Step 1 LLM)
+  prepData        Json?     @map("prep_data")
+  prepModel       String?   @map("prep_model")
+  prepCompletedAt DateTime? @map("prep_completed_at")
+
+  // in-call data (ElevenLabs)
+  elevenlabsAgentId        String?   @map("elevenlabs_agent_id")
+  elevenlabsConversationId String?   @map("elevenlabs_conversation_id")
+  callStartedAt            DateTime? @map("call_started_at")
+  callEndedAt              DateTime? @map("call_ended_at")
+  callDurationSeconds      Int?      @map("call_duration_seconds")
+  fullAudioUrl             String?   @map("full_audio_url")
+
+  // status
+  status       SessionStatus @default(pending)
+  errorMessage String?       @map("error_message")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resume          Resume           @relation(fields: [resumeId], references: [id], onDelete: Restrict)
+  jobDescription  JobDescription   @relation(fields: [jobDescriptionId], references: [id], onDelete: Restrict)
+  transcriptTurns TranscriptTurn[]
+  reportCards     ReportCard[]
+  llmCalls        LlmCall[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status])
+  @@index([elevenlabsConversationId])
+  @@map("interview_sessions")
+}
+
+// =====================================================
+// TRANSCRIPT TURNS
+// =====================================================
+
+model TranscriptTurn {
+  id        String      @id @default(uuid()) @db.Uuid
+  sessionId String      @map("session_id") @db.Uuid
+  turnIndex Int         @map("turn_index")
+  speaker   SpeakerRole
+  content   String
+
+  startMs Int @map("start_ms")
+  endMs   Int @map("end_ms")
+
+  audioUrl       String? @map("audio_url")
+  wordTimestamps Json?   @map("word_timestamps")
+  sttConfidence  Float?  @map("stt_confidence")
+
+  questionIndex Int? @map("question_index")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session    InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  jdFitItems JdFitItem[]
+
+  @@unique([sessionId, turnIndex])
+  @@index([sessionId, questionIndex])
+  @@map("transcript_turns")
+}
+
+// =====================================================
+// REPORT CARDS
+// =====================================================
+
+model ReportCard {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+
+  rubricVersion  String @map("rubric_version")
+  evaluatorModel String @map("evaluator_model")
+
+  overallScore         Int            @map("overall_score")
+  recommendation       Recommendation
+  recommendationReason String         @map("recommendation_reason")
+
+  scoreCommunication   Int @map("score_communication")
+  scoreJdRelevance     Int @map("score_jd_relevance")
+  scoreExperienceDepth Int @map("score_experience_depth")
+  scoreSpecificity     Int @map("score_specificity")
+  scoreConfidence      Int @map("score_confidence")
+
+  strengths Json
+  gaps      Json
+  summary   String
+
+  rawLlmResponse Json?   @map("raw_llm_response")
+  isCurrent      Boolean @default(true) @map("is_current")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session             InterviewSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  questionEvaluations QuestionEvaluation[]
+  jdFitItems          JdFitItem[]
+  shareLinks          ReportShareLink[]
 
   @@index([sessionId])
-  @@index([sessionId, order])
+  @@map("report_cards")
+}
+
+// =====================================================
+// QUESTION EVALUATIONS
+// =====================================================
+
+model QuestionEvaluation {
+  id           String @id @default(uuid()) @db.Uuid
+  reportCardId String @map("report_card_id") @db.Uuid
+
+  questionIndex Int    @map("question_index")
+  questionText  String @map("question_text")
+  answerSummary String @map("answer_summary")
+
+  score           Int
+  whatWorked      String? @map("what_worked")
+  whatToImprove   String? @map("what_to_improve")
+  transcriptQuote String? @map("transcript_quote")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  reportCard ReportCard @relation(fields: [reportCardId], references: [id], onDelete: Cascade)
+
+  @@unique([reportCardId, questionIndex])
+  @@map("question_evaluations")
+}
+
+// =====================================================
+// JD-FIT MATRIX
+// =====================================================
+
+model JdFitItem {
+  id           String  @id @default(uuid()) @db.Uuid
+  reportCardId String  @map("report_card_id") @db.Uuid
+  turnId       String? @map("turn_id") @db.Uuid
+
+  requirement String
+  isMustHave  Boolean   @map("is_must_have")
+  status      FitStatus
+  evidence    String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  reportCard ReportCard      @relation(fields: [reportCardId], references: [id], onDelete: Cascade)
+  turn       TranscriptTurn? @relation(fields: [turnId], references: [id], onDelete: SetNull)
+
+  @@index([reportCardId])
+  @@map("jd_fit_items")
+}
+
+// =====================================================
+// SHAREABLE REPORT LINKS
+// =====================================================
+
+model ReportShareLink {
+  id           String @id @default(uuid()) @db.Uuid
+  reportCardId String @map("report_card_id") @db.Uuid
+
+  token        String    @unique
+  expiresAt    DateTime? @map("expires_at")
+  viewCount    Int       @default(0) @map("view_count")
+  lastViewedAt DateTime? @map("last_viewed_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  reportCard ReportCard @relation(fields: [reportCardId], references: [id], onDelete: Cascade)
+
+  @@index([reportCardId])
+  @@map("report_share_links")
+}
+
+// =====================================================
+// LLM CALL LOG (observability)
+// =====================================================
+
+model LlmCall {
+  id        String  @id @default(uuid()) @db.Uuid
+  sessionId String? @map("session_id") @db.Uuid
+  userId    String? @map("user_id") @db.Uuid
+
+  purpose  LlmPurpose
+  model    String
+  provider String
+
+  prompt   Json
+  response Json?
+
+  inputTokens  Int?     @map("input_tokens")
+  outputTokens Int?     @map("output_tokens")
+  costUsd      Decimal? @map("cost_usd") @db.Decimal(10, 6)
+  latencyMs    Int?     @map("latency_ms")
+
+  succeeded     Boolean
+  errorMessage  String? @map("error_message")
+  attemptNumber Int     @default(1) @map("attempt_number")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session InterviewSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  user    User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([purpose, createdAt(sort: Desc)])
+  @@map("llm_calls")
 }
