@@ -53,23 +53,34 @@ async function callOpenRouter(messages: ChatMessage[]) {
     throw new AIResponseError("OPENROUTER_API_KEY is not configured.");
   }
 
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
-      "X-Title": "PrepMate AI",
-    },
-    body: JSON.stringify({
-      model: process.env.OPENROUTER_MODEL ?? DEFAULT_MODEL,
-      messages,
-      temperature: 0.3,
-      response_format: {
-        type: "json_object",
+  let response: Response;
+  try {
+    response = await fetch(OPENROUTER_API_URL, {
+      method: "POST",
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+        "X-Title": "PrepMate AI",
       },
-    }),
-  });
+      body: JSON.stringify({
+        model: process.env.OPENROUTER_MODEL ?? DEFAULT_MODEL,
+        messages,
+        temperature: 0.3,
+        response_format: {
+          type: "json_object",
+        },
+      }),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new AIResponseError("OpenRouter request timed out after 60s.");
+    }
+    throw new AIResponseError(
+      error instanceof Error ? `OpenRouter network error: ${error.message}` : "OpenRouter network error.",
+    );
+  }
 
   const payload = (await response.json().catch(() => null)) as OpenRouterResponse | null;
 
@@ -162,18 +173,23 @@ function parseEvaluationResponse(raw: string, fallbackQuestion?: string): Interv
   };
 }
 
-export async function generateInterviewQuestion(jdText: string, history: Array<{ question: string; answer: string }> = []) {
+export async function generateInterviewQuestion(
+  jdText: string,
+  history: Array<{ question: string; answer: string }> = [],
+  resume?: string,
+) {
   const content = await callOpenRouter([
     {
       role: "system",
       content:
-        "You are Maya from PrepMate AI, a warm, sharp HR interviewer. You sound alive, conversational, and professional. Ask one realistic interview question at a time, based only on the JD and prior answers. Do not reveal question counts. Return only valid JSON. Do not include markdown, code fences, or commentary.",
+        "You are Maya from PrepMate AI, a warm, sharp HR interviewer. You sound alive, conversational, and professional. Ask one realistic interview question at a time, grounded in the JD, the candidate's resume, and prior answers. Mix behavioral, motivation, role-fit, communication, scenario, and technical-screening questions. Do not reveal question counts. Return only valid JSON. Do not include markdown, code fences, or commentary.",
     },
     {
       role: "user",
       content: JSON.stringify({
-        task: "Generate the next HR-style interview question for this candidate. Make it specific to the JD. Mix behavioral, motivation, role-fit, communication, scenario, and technical-screening questions naturally.",
+        task: "Generate the next HR-style interview question for this candidate. Make it specific to the JD and the candidate's background.",
         jobDescription: jdText,
+        candidateResume: resume ?? "",
         previousQuestionsAndAnswers: history,
         outputSchema: {
           question: "string",
@@ -250,6 +266,7 @@ export async function evaluateInterviewAnswer(params: {
   jdText: string;
   answer: string;
   question?: string;
+  resume?: string;
   shouldAskNextQuestion?: boolean;
   history?: Array<{ question: string; answer: string }>;
 }) {
@@ -257,13 +274,14 @@ export async function evaluateInterviewAnswer(params: {
     {
       role: "system",
       content:
-        "You are Maya from PrepMate AI, a warm but discerning HR interviewer. Evaluate honestly, coach briefly, and keep the interview moving like a real HR screen. Return only valid JSON. Scores must be integers from 0 to 10. Do not reveal question counts or internal limits.",
+        "You are Maya from PrepMate AI, a warm but discerning HR interviewer. Evaluate honestly, coach briefly, and keep the interview moving like a real HR screen. Ground every next question in the JD and the candidate's resume. Return only valid JSON. Scores must be integers from 0 to 10. Do not reveal question counts or internal limits.",
     },
     {
       role: "user",
       content: JSON.stringify({
-        task: "Evaluate the candidate answer. If shouldAskNextQuestion is true, also ask the next natural HR-style interview question. If false, do not ask another question.",
+        task: "Evaluate the candidate answer. If shouldAskNextQuestion is true, also ask the next natural HR-style interview question grounded in the JD and resume. If false, do not ask another question.",
         jobDescription: params.jdText,
+        candidateResume: params.resume ?? "",
         question: params.question,
         answer: params.answer,
         previousQuestionsAndAnswers: params.history ?? [],

@@ -9,6 +9,9 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+
+import { AutoFinalizer } from "./AutoFinalizer";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +24,9 @@ type SummaryShape = {
   overallScore: number;
   strengths: string[];
   improvements: string[];
+  partial: boolean;
+  successCount?: number;
+  totalTurns?: number;
 };
 
 function formatDate(date: Date) {
@@ -49,6 +55,9 @@ function toSummary(value: unknown): SummaryShape | null {
     improvements: Array.isArray(v.improvements)
       ? v.improvements.filter((x): x is string => typeof x === "string")
       : [],
+    partial: v.partial === true,
+    successCount: typeof v.successCount === "number" ? v.successCount : undefined,
+    totalTurns: typeof v.totalTurns === "number" ? v.totalTurns : undefined,
   };
 }
 
@@ -74,6 +83,9 @@ export default async function InterviewDetailPage({
   const content = average(answered.map((r) => r.contentScore));
   const communication = average(answered.map((r) => r.communicationScore));
   const confidence = average(answered.map((r) => r.confidenceScore));
+
+  const needsScoring =
+    session.status === "COMPLETED" && !summary && answered.length > 0;
 
   return (
     <DashboardShell user={user} active="dashboard">
@@ -119,6 +131,8 @@ export default async function InterviewDetailPage({
         </div>
       </header>
 
+      {needsScoring ? <AutoFinalizer sessionId={session.id} /> : null}
+
       {summary ? (
         <Card>
           <CardContent className="grid gap-6 p-6 lg:grid-cols-[1fr_auto] lg:items-start">
@@ -153,7 +167,7 @@ export default async function InterviewDetailPage({
         </Card>
       ) : null}
 
-      {answered.length ? (
+      {answered.length && !needsScoring ? (
         <Card>
           <CardContent className="grid gap-4 p-6 sm:grid-cols-3">
             <ScoreTile label="Content" value={content} />
@@ -204,6 +218,22 @@ export default async function InterviewDetailPage({
                         <MiniScore label="Content" value={result.contentScore} />
                         <MiniScore label="Communication" value={result.communicationScore} />
                         <MiniScore label="Confidence" value={result.confidenceScore} />
+                      </div>
+                    </div>
+                  ) : needsScoring ? (
+                    <div className="grid gap-3 rounded-lg border border-border bg-muted/30 p-4">
+                      <div className="flex items-center gap-2">
+                        <MessageSquare className="h-3.5 w-3.5 text-primary" />
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Feedback
+                        </p>
+                      </div>
+                      <Skeleton className="h-4 w-full" />
+                      <Skeleton className="h-4 w-5/6" />
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        <Skeleton className="h-12 w-full" />
+                        <Skeleton className="h-12 w-full" />
+                        <Skeleton className="h-12 w-full" />
                       </div>
                     </div>
                   ) : null}

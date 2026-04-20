@@ -13,7 +13,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
 } from "@/components/ui/sidebar";
-import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 import { UserMenu } from "./UserMenu";
@@ -85,13 +84,7 @@ export function DashboardShell({
 
         <SidebarInset>
           <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-            <div className="hidden items-center justify-end gap-2 lg:flex">
-              <Button asChild variant="outline" size="sm">
-                <Link href="/interview/new">
-                  <ClipboardList className="h-4 w-4" />
-                  New interview
-                </Link>
-              </Button>
+            <div className="hidden items-center justify-end gap-1 lg:flex">
               <ThemeToggle />
               <UserMenu user={user} />
             </div>

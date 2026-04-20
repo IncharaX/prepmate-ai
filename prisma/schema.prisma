@@ -32,7 +32,9 @@ model InterviewSession {
   userId           String
   title            String            @default("Interview")
   domain           String
-  resumeText       String            @db.Text
+  resumeText       String            @db.Text // legacy name — stores JD
+  resume           String?           @db.Text // candidate's resume
+  elevenLabsConvId String?
   mode             InterviewMode     @default(TEXT)
   plannedQuestions Int               @default(7)
   status           InterviewStatus   @default(IN_PROGRESS)

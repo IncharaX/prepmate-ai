@@ -52,13 +52,28 @@ export function NewInterviewForm() {
             <Textarea
               id="jdText"
               name="jdText"
-              rows={10}
+              rows={8}
               placeholder="Paste the full job description — responsibilities, tech stack, seniority, team context."
-              className="min-h-48"
+              className="min-h-40"
               required
             />
             {state?.fieldErrors?.jdText ? (
               <p className="text-xs text-destructive">{state.fieldErrors.jdText[0]}</p>
+            ) : null}
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="resume">Your resume</Label>
+            <Textarea
+              id="resume"
+              name="resume"
+              rows={8}
+              placeholder="Paste your resume as plain text. Maya will use this to ask questions about your experience."
+              className="min-h-40"
+              required
+            />
+            {state?.fieldErrors?.resume ? (
+              <p className="text-xs text-destructive">{state.fieldErrors.resume[0]}</p>
             ) : null}
           </div>
         </CardContent>

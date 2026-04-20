@@ -29,6 +29,10 @@ export const startInterviewSchema = z.object({
     .string()
     .min(40, { message: "Paste the full job description (at least 40 characters)." })
     .max(20000, { message: "JD is too long." }),
+  resume: z
+    .string()
+    .min(40, { message: "Paste your resume (at least 40 characters)." })
+    .max(20000, { message: "Resume is too long." }),
   numQuestions: z
     .number()
     .int()
